@@ -25,19 +25,17 @@
 
 # CELL ********************
 
-# Create Silver Products Table — Creates the Delta table to store cleansed and transformed product data in the Silver layer.
+# Create Silver Orders Table — Creates the Delta table to store cleansed and transformed product data in the Silver layer.
+
 spark.sql("""
-CREATE TABLE IF NOT EXISTS silver_products (
+CREATE TABLE IF NOT EXISTS silver_orders (
+    order_id STRING,
+    customer_id STRING,
     product_id STRING,
-    name STRING,
-    category STRING,
-    brand STRING,
-    price DOUBLE,
-    stock_quantity INT,
-    rating DOUBLE,
-    is_active BOOLEAN,
-    price_category STRING,
-    stock_status STRING,
+    quantity INT,
+    total_amount DOUBLE,
+    transaction_date DATE,
+    order_status STRING,
     last_updated TIMESTAMP
 )
 USING DELTA
@@ -53,7 +51,7 @@ USING DELTA
 # CELL ********************
 
 # Get the latest processed timestamp for incremental loading
-last_processed_df = spark.sql("SELECT MAX(last_updated) as last_processed FROM silver_products")
+last_processed_df = spark.sql("SELECT MAX(last_updated) as last_processed FROM silver_orders")
 last_processed_timestamp = last_processed_df.collect()[0]['last_processed']
 if last_processed_timestamp is None:
     last_processed_timestamp = "1900-01-01T00:00:00.000+00:00"
@@ -82,7 +80,7 @@ print("Last processed timestamp:", last_processed_timestamp)
 spark.sql(f"""
 CREATE OR REPLACE TEMPORARY VIEW bronze_incremental AS
 SELECT *
-FROM BronzeLayer.dbo.Product
+FROM BronzeLayer.dbo.Orders
 WHERE ingestion_timestamp > '{last_processed_timestamp}'
 """)
 
@@ -100,7 +98,7 @@ print("bronze_incremental created successfully")
 ### 🔄 Create Bronze Incremental View — Filters newly ingested product records from the Bronze layer based on the last processed timestamp.
 bronze_incremental_df = spark.sql(f"""
     SELECT *
-    FROM BronzeLayer.dbo.Product
+    FROM BronzeLayer.dbo.Orders
     WHERE ingestion_timestamp > '{last_processed_timestamp}'
 """)
 
@@ -118,42 +116,32 @@ print("bronze_incremental created successfully")
 
 # CELL ********************
 
-# Transform Silver Products — Cleanses product data, handles invalid values, derives price and stock categories, and adds the Silver-layer timestamp.
+### Transform Silver Orders --> Cleanses and transforms incremental order data, validates key fields, derives order status, and prepares records for the Silver layer.
 spark.sql("""
-CREATE OR REPLACE TEMPORARY VIEW silver_incremental_products AS
+CREATE OR REPLACE TEMPORARY VIEW silver_incremental_orders AS
 SELECT
+    transaction_id as order_id,
+    customer_id,
     product_id,
-    name,
-    category,
-    brand,
     CASE
-        WHEN price < 0 THEN 0
-        ELSE price
-    END AS price,
+        WHEN quantity < 0 THEN 0
+        ELSE quantity
+    END AS quantity,
     CASE
-        WHEN stock_quantity < 0 THEN 0
-        ELSE stock_quantity
-    END AS stock_quantity,
+        WHEN total_amount < 0 THEN 0
+        ELSE total_amount
+    END AS total_amount,
+    CAST(transaction_date AS DATE) AS transaction_date,
     CASE
-        WHEN rating < 0 THEN 0
-        WHEN rating > 5 THEN 5
-        ELSE rating
-    END AS rating,
-    is_active,
-    CASE
-        WHEN price > 1000 THEN 'Premium'
-        WHEN price > 100 THEN 'Standard'
-        ELSE 'Budget'
-    END AS price_category,
-    CASE
-        WHEN stock_quantity = 0 THEN 'Out of Stock'
-        WHEN stock_quantity < 10 THEN 'Low Stock'
-        WHEN stock_quantity < 50 THEN 'Moderate Stock'
-        ELSE 'Sufficient Stock'
-    END AS stock_status,
+        WHEN quantity = 0 AND total_amount = 0 THEN 'Cancelled'
+        WHEN quantity > 0 AND total_amount > 0 THEN 'Completed'
+        ELSE 'In Progress'
+    END AS order_status,
     CURRENT_TIMESTAMP() AS last_updated
 FROM bronze_incremental
-WHERE name IS NOT NULL AND category IS NOT NULL
+WHERE transaction_date IS NOT NULL 
+  AND customer_id IS NOT NULL 
+  AND product_id IS NOT NULL
 """)
 
 # METADATA ********************
@@ -165,11 +153,11 @@ WHERE name IS NOT NULL AND category IS NOT NULL
 
 # CELL ********************
 
-### 🔄 Merge Silver Products — Merges transformed incremental data into the Silver table, updating existing products and inserting new records.
+### 🔄 Merge Silver Orders — Merges transformed incremental data into the Silver table, updating existing products and inserting new records.
 spark.sql("""
-MERGE INTO silver_products target
-USING silver_incremental_products source
-ON target.product_id = source.product_id
+MERGE INTO silver_orders target
+USING silver_incremental_orders source
+ON target.order_id = source.order_id
 WHEN MATCHED THEN
     UPDATE SET *
 WHEN NOT MATCHED THEN
@@ -185,13 +173,13 @@ WHEN NOT MATCHED THEN
 
 # CELL ********************
 
-# Verify the final Silver Products table after MERGE
+# Verify the final Silver Orders table after MERGE
 
 display(
     spark.sql("""
         SELECT *
-        FROM Silver_Layer.dbo.silver_products
-        ORDER BY product_id
+        FROM Silver_Layer.dbo.silver_orders
+        ORDER BY order_id
         LIMIT 20
     """)
 )
@@ -205,7 +193,7 @@ display(
 
 # CELL ********************
 
-spark.sql("select count(*) from silver_products").show()
+spark.sql("select count(*) from silver_orders").show()
 
 # METADATA ********************
 
@@ -216,17 +204,17 @@ spark.sql("select count(*) from silver_products").show()
 
 # MARKDOWN ********************
 
-# # Silver Layer – Product Load
+# # Silver Layer – Order Load
 # 
-# Transforms and incrementally loads product data from Bronze to Silver using PySpark.
+# Transforms and incrementally loads order data from Bronze to Silver using PySpark.
 # 
 # ## Key Steps
 # 
-# - Identify new/updated products using watermarking.
-# - Validate and cleanse product data.
-# - Derive price and stock categories.
+# - Identify new/updated orders using watermarking.
+# - Validate and cleanse order data.
+# - Derive order status and standardize values.
 # - MERGE new and updated records into the Silver table.
 # 
 # ## Data Flow
 # 
-# `Bronze Product → Incremental Filter → Transformation → MERGE → Silver Product`
+# `Bronze Order → Incremental Filter → Transformation → MERGE → Silver Order`
