@@ -26,7 +26,7 @@
 # CELL ********************
 
 # Welcome to your new notebook
-# Type here in the cell editor to add code!
+# Create Silver customer table for transformed customer data
 spark.sql("""
     CREATE TABLE IF NOT EXISTS silver_customers (
     customer_id STRING,
@@ -52,6 +52,7 @@ spark.sql("""
 
 # CELL ********************
 
+# Get the latest processed timestamp for incremental loading
 last_processed_df = spark.sql("SELECT MAX(last_updated) as last_processed FROM silver_customers")
 last_processed_timestamp = last_processed_df.collect()[0]['last_processed']
 if last_processed_timestamp is None:
@@ -77,12 +78,15 @@ print("Last processed timestamp:", last_processed_timestamp)
 
 # CELL ********************
 
+# Create a temporary view containing new Bronze records for incremental processing
 spark.sql(f"""
 CREATE OR REPLACE TEMPORARY VIEW bronze_incremental AS
 SELECT *
-FROM BronzeLayer.dbo.Customer c
-WHERE c.ingestion_timestamp > '{last_processed_timestamp}'
+FROM BronzeLayer.dbo.Customer
+WHERE ingestion_timestamp > '{last_processed_timestamp}'
 """)
+
+print("bronze_incremental created successfully")
 
 # METADATA ********************
 
@@ -93,12 +97,70 @@ WHERE c.ingestion_timestamp > '{last_processed_timestamp}'
 
 # CELL ********************
 
-# Test it 
+# Read new Bronze records using the watermark and create a temporary incremental view
+bronze_incremental_df = spark.sql(f"""
+    SELECT *
+    FROM BronzeLayer.dbo.Customer
+    WHERE ingestion_timestamp > '{last_processed_timestamp}'
+""")
+
+# Create temporary view from the DataFrame
+bronze_incremental_df.createOrReplaceTempView("bronze_incremental")
+
+print("bronze_incremental created successfully")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Transform incremental Bronze data, validate records, and derive customer attributes
+spark.sql("""
+CREATE OR REPLACE TEMPORARY VIEW silver_incremental AS
+SELECT
+    customer_id,
+    name,
+    email,
+    country,
+    customer_type,
+    registration_date,
+    age,
+    gender,
+    total_purchases,
+    CASE
+        WHEN total_purchases > 10000 THEN 'High Value'
+        WHEN total_purchases > 5000 THEN 'Medium Value'
+        ELSE 'Low Value'
+    END AS customer_segment,
+    DATEDIFF(CURRENT_DATE(), registration_date) AS days_since_registration,
+    CURRENT_TIMESTAMP() AS last_updated
+FROM bronze_incremental
+WHERE 
+    age BETWEEN 18 AND 100
+    AND email IS NOT NULL
+    AND total_purchases >= 0
+""")
+
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Verify the transformed Silver records before loading into the permanent Silver table
 display(
     spark.sql("""
         SELECT *
-        FROM BronzeLayer.dbo.Customer
-        LIMIT 11
+        FROM silver_incremental
+        LIMIT 10
     """)
 )
 
@@ -109,14 +171,74 @@ display(
 # META   "language_group": "synapse_pyspark"
 # META }
 
+# CELL ********************
+
+# Merge transformed records into Silver, updating existing customers and inserting new ones
+
+spark.sql("""
+MERGE INTO Silver_Layer.dbo.silver_customers AS target
+USING silver_incremental AS source
+
+ON target.customer_id = source.customer_id
+
+WHEN MATCHED THEN
+    UPDATE SET *
+
+WHEN NOT MATCHED THEN
+    INSERT *
+""")
+
+print("Silver MERGE completed successfully")
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+# Verify the final Silver customer table after MERGE
+
+display(
+    spark.sql("""
+        SELECT *
+        FROM Silver_Layer.dbo.silver_customers
+        ORDER BY customer_id
+        LIMIT 20
+    """)
+)
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
+# CELL ********************
+
+spark.sql("select count(*) from silver_customers").show()
+
+# METADATA ********************
+
+# META {
+# META   "language": "python",
+# META   "language_group": "synapse_pyspark"
+# META }
+
 # MARKDOWN ********************
 
-# Sure — in simple terms, you have completed these steps:
+# # Silver Layer – Customer Load
 # 
-# 1. **Created the `silver_customers` table** in the `Silver_Layer` Lakehouse with the required customer columns.
-# 2. **Checked the last processed timestamp** from the Silver table. Since this is the first load, you set it to **`1900-01-01`**.
-# 3. **Created the `bronze_incremental` temporary view** to identify new customer records from the Bronze layer based on `ingestion_timestamp`.
-# 4. **Successfully accessed `BronzeLayer.dbo.Customer`** and verified that customer records are available, including the `ingestion_timestamp` column.
-
-# MARKDOWN ********************
-
+# Transforms and incrementally loads customer data from Bronze to Silver using PySpark.
+# 
+# ### Key Steps
+# - Identify new/updated records using watermarking.
+# - Validate and transform customer data.
+# - Derive customer segment and registration days.
+# - MERGE new and updated records into the Silver table.
+# 
+# ### Data Flow
+# `Bronze Customer → Incremental Filter → Transformation → MERGE → Silver Customer`
