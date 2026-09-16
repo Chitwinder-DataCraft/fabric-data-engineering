@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Notebook",
+    "displayName": "Goldlayer_DailySales"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "c3162ba0-4697-8bb9-44ae-09da0078474d"
+  }
+}
