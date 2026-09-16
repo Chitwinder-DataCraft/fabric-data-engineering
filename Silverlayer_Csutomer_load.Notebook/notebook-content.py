@@ -98,7 +98,7 @@ display(
     spark.sql("""
         SELECT *
         FROM BronzeLayer.dbo.Customer
-        LIMIT 10
+        LIMIT 11
     """)
 )
 
